@@ -19,7 +19,7 @@ except ImportError:
     HAS_TWSTOCK = False
 
 # ==========================================
-# 1. 頁面設定與自訂美化 CSS (Fugle / 三竹風格)
+# 1. 頁面設定與自訂美化 CSS (修復字體截斷與新聞卡片)
 # ==========================================
 st.set_page_config(
     page_title="台股全能 AI 投資終端",
@@ -35,22 +35,43 @@ st.markdown(
     div[data-testid="stMetric"] {
         background-color: rgba(128, 128, 128, 0.08);
         border: 1px solid rgba(128, 128, 128, 0.18);
-        padding: 12px 16px;
+        padding: 12px 14px;
         border-radius: 10px;
     }
+    /* 縮小指標卡數字字體，避免 244.5... 被截斷 */
+    div[data-testid="stMetricValue"] {
+        font-size: 1.35rem !important;
+    }
     .news-card {
-        padding: 12px 16px;
-        margin-bottom: 10px;
+        padding: 14px 18px;
+        margin-bottom: 12px;
         border-radius: 8px;
-        background-color: rgba(128, 128, 128, 0.06);
+        background-color: rgba(128, 128, 128, 0.07);
         border-left: 4px solid #ef5350;
+        transition: background-color 0.2s;
+    }
+    .news-card:hover {
+        background-color: rgba(128, 128, 128, 0.14);
+    }
+    .news-link {
+        color: #58a6ff !important;
+        text-decoration: none !important;
+        font-weight: 600;
+        font-size: 1.05rem;
+        line-height: 1.5;
+        display: inline-block;
+        margin-top: 4px;
+    }
+    .news-link:hover {
+        text-decoration: underline !important;
+        color: #79c0ff !important;
     }
     </style>
     """,
     unsafe_allow_html=True,
 )
 
-# 相容最新版 Streamlit st.iframe，消除終端機棄用警告
+
 def render_chart_html(html_str: str, height: int = 520):
     if hasattr(st, "iframe"):
         st.iframe(html_str, height=height)
@@ -80,7 +101,7 @@ if "kill_switch" not in st.session_state:
 
 
 # ==========================================
-# 3. 股票代號/中文名稱智慧解析與快取資料引擎
+# 3. 股票代號解析與快取資料引擎
 # ==========================================
 def get_stock_name(stock_id: str) -> str:
     if HAS_TWSTOCK and stock_id in twstock.codes:
@@ -93,7 +114,6 @@ def get_stock_name(stock_id: str) -> str:
 
 
 def resolve_stock_input(query: str):
-    """支援輸入代號 (如 2330) 或中文名稱 (如 台積電) 自動轉換為標準代號"""
     q = query.strip()
     if not q:
         return None
@@ -110,13 +130,13 @@ def resolve_stock_input(query: str):
 
 @st.cache_data(ttl=300)
 def fetch_watchlist_quotes(stock_ids: list) -> dict:
-    """批次快速抓取自選股清單的最新報價與漲跌幅（三竹風格看盤列使用）"""
     quotes = {}
     for sid in stock_ids:
         try:
             df = yf.Ticker(f"{sid}.TW").history(period="5d")
             if df.empty:
                 df = yf.Ticker(f"{sid}.TWO").history(period="5d")
+            df = df.dropna(subset=["Close"])
             if not df.empty and len(df) >= 2:
                 close = float(df["Close"].iloc[-1])
                 prev = float(df["Close"].iloc[-2])
@@ -130,9 +150,7 @@ def fetch_watchlist_quotes(stock_ids: list) -> dict:
 
 
 @st.cache_data(ttl=600)
-@st.cache_data(ttl=600)
 def fetch_stock_quant_data(stock_id: str, period: str = "6mo"):
-    """抓取歷史 K 線與計算全套技術指標 (MA, 布林, RSI, KD, MACD, ATR, MDD)"""
     ticker_symbol = f"{stock_id}.TW"
     df = yf.Ticker(ticker_symbol).history(period=period)
     if df.empty:
@@ -141,22 +159,20 @@ def fetch_stock_quant_data(stock_id: str, period: str = "6mo"):
     if df.empty:
         return None
 
-    # ✅ 關鍵修改：先過濾掉價格為 NaN 的列，再重設索引
     df = df.dropna(subset=["Open", "High", "Low", "Close"]).reset_index()
+    if df.empty:
+        return None
+
     df["DateStr"] = pd.to_datetime(df["Date"]).dt.strftime("%Y-%m-%d")
 
-    # 均線
     df["MA5"] = df["Close"].rolling(5).mean()
-
     df["MA20"] = df["Close"].rolling(20).mean()
     df["MA60"] = df["Close"].rolling(60).mean()
 
-    # 布林通道
     bb = ta.volatility.BollingerBands(close=df["Close"], window=20, window_dev=2)
     df["BB_High"] = bb.bollinger_hband()
     df["BB_Low"] = bb.bollinger_lband()
 
-    # RSI 與 KD (Stochastic Oscillator)
     df["RSI"] = ta.momentum.RSIIndicator(close=df["Close"], window=14).rsi()
     stoch = ta.momentum.StochasticOscillator(
         high=df["High"], low=df["Low"], close=df["Close"], window=9, smooth_window=3
@@ -164,7 +180,6 @@ def fetch_stock_quant_data(stock_id: str, period: str = "6mo"):
     df["K"] = stoch.stoch()
     df["D"] = stoch.stoch_signal()
 
-    # MACD 與 ATR
     macd_obj = ta.trend.MACD(close=df["Close"])
     df["MACD"] = macd_obj.macd()
     df["MACD_Signal"] = macd_obj.macd_signal()
@@ -173,68 +188,15 @@ def fetch_stock_quant_data(stock_id: str, period: str = "6mo"):
         high=df["High"], low=df["Low"], close=df["Close"], window=14
     ).average_true_range()
 
-    # 最大回撤 (MDD)
     rolling_max = df["Close"].cummax()
     df["Drawdown"] = (df["Close"] - rolling_max) / rolling_max
 
     return df
 
 
-@st.cache_data(ttl=1800)
-def fetch_stock_fundamentals(stock_id: str) -> dict:
-    """抓取個股基本面、財務估值與公司簡介"""
-    for suffix in [".TW", ".TWO"]:
-        try:
-            tk = yf.Ticker(f"{stock_id}{suffix}")
-            info = tk.info
-            if info and ("regularMarketPrice" in info or "currentPrice" in info or "marketCap" in info):
-                return {
-                    "market_cap": info.get("marketCap"),
-                    "trailing_pe": info.get("trailingPE"),
-                    "forward_pe": info.get("forwardPE"),
-                    "price_to_book": info.get("priceToBook"),
-                    "dividend_yield": info.get("dividendYield"),
-                    "eps": info.get("trailingEps"),
-                    "roe": info.get("returnOnEquity"),
-                    "revenue_growth": info.get("revenueGrowth"),
-                    "gross_margins": info.get("grossMargins"),
-                    "operating_margins": info.get("operatingMargins"),
-                    "52w_high": info.get("fiftyTwoWeekHigh"),
-                    "52w_low": info.get("fiftyTwoWeekLow"),
-                    "sector": info.get("sector", "台灣上市櫃企業"),
-                    "industry": info.get("industry", "一般產業"),
-                    "summary": info.get("longBusinessSummary", "暫無公司詳細簡介。"),
-                }
-        except Exception:
-            continue
-    return {}
-
-
-def analyze_twstock_best_four_point(stock_id: str):
-    """twstock 四大買賣點分析"""
-    stock_name = get_stock_name(stock_id)
-    bfp_summary = "歷史指標輔助判讀中（非盤中時段或無即時連線）"
-
-    if HAS_TWSTOCK and stock_id in twstock.codes:
-        try:
-            stock_obj = twstock.Stock(stock_id)
-            bfp = twstock.BestFourPoint(stock_obj)
-            buy_r = bfp.best_four_point_to_buy()
-            sell_r = bfp.best_four_point_to_sell()
-            overall = bfp.best_four_point()
-            bfp_summary = (
-                f"🟢 四大買點：{buy_r if buy_r else '無'} ｜ "
-                f"🔴 四大賣點：{sell_r if sell_r else '無'} ｜ "
-                f"⚖️ 綜合判定：{'偏多買進' if overall and overall[0] else '偏空賣出' if overall else '中立觀望'}"
-            )
-        except Exception:
-            pass
-    return stock_name, bfp_summary
-
-
 @st.cache_data(ttl=900)
 def fetch_finmind_data(stock_id: str, finmind_token: str = ""):
-    """使用 FinMind 抓取個股新聞（含連結）與三大法人買賣超明細表"""
+    """使用 FinMind 抓取最新新聞、三大法人買賣超與官方本益比/殖利率/股價淨值比"""
     dl = DataLoader()
     if finmind_token:
         try:
@@ -242,28 +204,50 @@ def fetch_finmind_data(stock_id: str, finmind_token: str = ""):
         except Exception:
             pass
 
-    start_date = (datetime.date.today() - datetime.timedelta(days=20)).strftime("%Y-%m-%d")
+    news_start = (datetime.date.today() - datetime.timedelta(days=7)).strftime("%Y-%m-%d")
+    chips_start = (datetime.date.today() - datetime.timedelta(days=25)).strftime("%Y-%m-%d")
+
     news_items = []
     chips_summary = "暫無近期法人籌碼資料"
     chips_daily_df = pd.DataFrame()
+    val_dict = {"pe": None, "pb": None, "dividend_yield": None}
 
+    # 1. 抓取最新 7 天新聞並由新到舊排序
     try:
-        news_df = dl.taiwan_stock_news(stock_id=stock_id, start_date=start_date)
+        news_df = dl.taiwan_stock_news(stock_id=stock_id, start_date=news_start)
         if not news_df.empty:
-            raw_records = news_df.tail(12).to_dict("records")
-            for r in reversed(raw_records):
-                news_items.append({
-                    "date": r.get("date", ""),
-                    "title": r.get("title", "無標題"),
-                    "link": r.get("link", ""),
-                    "source": r.get("source", "財經新聞"),
-                })
+            news_df = news_df.sort_values(by="date", ascending=False)
+            seen_titles = set()
+            for r in news_df.to_dict("records"):
+                title = r.get("title", "").strip()
+                if title and title not in seen_titles:
+                    seen_titles.add(title)
+                    news_items.append({
+                        "date": r.get("date", ""),
+                        "title": title,
+                        "link": r.get("link", ""),
+                        "source": r.get("source", "財經新聞"),
+                    })
+                if len(news_items) >= 12:
+                    break
     except Exception:
         pass
 
+    # 2. 抓取證交所官方每日 本益比(PER)、淨值比(PBR)、殖利率(dividend_yield)
+    try:
+        per_df = dl.taiwan_stock_per(stock_id=stock_id, start_date=chips_start)
+        if not per_df.empty:
+            latest_per = per_df.iloc[-1]
+            val_dict["pe"] = float(latest_per["PER"]) if pd.notna(latest_per.get("PER")) and float(latest_per["PER"]) > 0 else None
+            val_dict["pb"] = float(latest_per["PBR"]) if pd.notna(latest_per.get("PBR")) and float(latest_per["PBR"]) > 0 else None
+            val_dict["dividend_yield"] = float(latest_per["dividend_yield"]) if pd.notna(latest_per.get("dividend_yield")) else None
+    except Exception:
+        pass
+
+    # 3. 抓取三大法人買賣超
     try:
         inst_df = dl.taiwan_stock_institutional_investors(
-            stock_id=stock_id, start_date=start_date
+            stock_id=stock_id, start_date=chips_start
         )
         if not inst_df.empty:
             inst_df["net_lots"] = (inst_df["buy"] - inst_df["sell"]) // 1000
@@ -286,7 +270,80 @@ def fetch_finmind_data(stock_id: str, finmind_token: str = ""):
     except Exception:
         pass
 
-    return news_items, chips_summary, chips_daily_df
+    return news_items, chips_summary, chips_daily_df, val_dict
+
+
+@st.cache_data(ttl=1800)
+def fetch_stock_fundamentals(stock_id: str, finmind_val: dict) -> dict:
+    """整合 FinMind 官方估值與 yfinance 基本面（避免雲端 IP 被擋出現 N/A）"""
+    result = {
+        "market_cap": None,
+        "trailing_pe": finmind_val.get("pe"),
+        "forward_pe": None,
+        "price_to_book": finmind_val.get("pb"),
+        "dividend_yield": finmind_val.get("dividend_yield"),
+        "eps": None,
+        "roe": None,
+        "revenue_growth": None,
+        "gross_margins": None,
+        "operating_margins": None,
+        "52w_high": None,
+        "52w_low": None,
+        "industry": "台灣上市櫃企業",
+        "summary": "暫無公司詳細簡介。",
+    }
+    if HAS_TWSTOCK and stock_id in twstock.codes:
+        result["industry"] = twstock.codes[stock_id].group or "台灣上市櫃企業"
+
+    for suffix in [".TW", ".TWO"]:
+        try:
+            tk = yf.Ticker(f"{stock_id}{suffix}")
+            # 用 1 年歷史 K 線直接算 52 週高低點（雲端 100% 不會被擋）
+            hist_1y = tk.history(period="1y")
+            if not hist_1y.empty:
+                result["52w_high"] = round(float(hist_1y["High"].max()), 2)
+                result["52w_low"] = round(float(hist_1y["Low"].min()), 2)
+
+            info = tk.info
+            if info:
+                result["market_cap"] = info.get("marketCap") or result["market_cap"]
+                result["trailing_pe"] = result["trailing_pe"] or info.get("trailingPE")
+                result["forward_pe"] = info.get("forwardPE")
+                result["price_to_book"] = result["price_to_book"] or info.get("priceToBook")
+                if result["dividend_yield"] is None and info.get("dividendYield"):
+                    dy = float(info["dividendYield"])
+                    result["dividend_yield"] = dy * 100 if dy < 1 else dy
+                result["eps"] = info.get("trailingEps")
+                result["roe"] = info.get("returnOnEquity")
+                result["revenue_growth"] = info.get("revenueGrowth")
+                result["gross_margins"] = info.get("grossMargins")
+                result["operating_margins"] = info.get("operatingMargins")
+                result["summary"] = info.get("longBusinessSummary", result["summary"])
+            break
+        except Exception:
+            continue
+    return result
+
+
+def analyze_twstock_best_four_point(stock_id: str):
+    stock_name = get_stock_name(stock_id)
+    bfp_summary = "歷史技術指標輔助判讀中"
+
+    if HAS_TWSTOCK and stock_id in twstock.codes:
+        try:
+            stock_obj = twstock.Stock(stock_id)
+            bfp = twstock.BestFourPoint(stock_obj)
+            buy_r = bfp.best_four_point_to_buy()
+            sell_r = bfp.best_four_point_to_sell()
+            overall = bfp.best_four_point()
+            bfp_summary = (
+                f"🟢 四大買點：{buy_r if buy_r else '無'} ｜ "
+                f"🔴 四大賣點：{sell_r if sell_r else '無'} ｜ "
+                f"⚖️ 綜合判定：{'偏多買進' if overall and overall[0] else '偏空賣出' if overall else '中立觀望'}"
+            )
+        except Exception:
+            pass
+    return stock_name, bfp_summary
 
 
 # ==========================================
@@ -364,10 +421,11 @@ def tool_get_stock_full_analysis(stock_id: str) -> dict:
 
     latest = df.iloc[-1]
     stock_name, bfp_info = analyze_twstock_best_four_point(stock_id)
-    fund = fetch_stock_fundamentals(stock_id)
-    news_items, chips_info, _ = fetch_finmind_data(
+    news_items, chips_info, _, finmind_val = fetch_finmind_data(
         stock_id, st.session_state.get("finmind_token", "")
     )
+    fund = fetch_stock_fundamentals(stock_id, finmind_val)
+
     formatted_news = [
         f"[{n['date']}] [{n['title']}]({n['link']})" if n.get("link") else f"[{n['date']}] {n['title']}"
         for n in news_items[:6]
@@ -387,9 +445,7 @@ def tool_get_stock_full_analysis(stock_id: str) -> dict:
         "max_drawdown_6m_pct": round(float(df["Drawdown"].min() * 100), 2),
         "PE_ratio": fund.get("trailing_pe"),
         "PB_ratio": fund.get("price_to_book"),
-        "dividend_yield": fund.get("dividend_yield"),
-        "EPS": fund.get("eps"),
-        "ROE": fund.get("roe"),
+        "dividend_yield_pct": fund.get("dividend_yield"),
         "twstock_best_four_point": bfp_info,
         "finmind_institutional_chips": chips_info,
         "recent_news_with_links": formatted_news,
@@ -447,7 +503,6 @@ with st.sidebar:
     st.markdown("## 📱 自選股看盤清單")
     st.caption("支援輸入「代號」或「中文股名」快速切換與新增")
 
-    # 搜尋與新增自選股
     search_col1, search_col2 = st.columns([2.2, 1])
     with search_col1:
         new_stock_query = st.text_input(
@@ -464,13 +519,12 @@ with st.sidebar:
             else:
                 st.warning("查無此代號或名稱")
 
-    # 批次抓取自選股報價並渲染三竹風格清單
     wl_quotes = fetch_watchlist_quotes(st.session_state.watchlist)
 
     for sid in list(st.session_state.watchlist):
         sname = get_stock_name(sid)
         q_info = wl_quotes.get(sid)
-        if q_info:
+        if q_info and pd.notna(q_info["price"]):
             pct = q_info["pct"]
             arrow = "🔺" if pct > 0 else "🟢" if pct < 0 else "➖"
             btn_label = f"{sid} {sname} ｜ {q_info['price']:.1f} ({arrow}{pct:+.2f}%)"
@@ -498,7 +552,6 @@ with st.sidebar:
 
     st.divider()
 
-    # 將系統與風控設定收納進 Expander，保持畫面極簡不凌亂
     with st.expander("⚙️ API 金鑰與風控參數設定", expanded=False):
         default_gemini_key = ""
         try:
@@ -534,10 +587,10 @@ with st.sidebar:
 target_stock = st.session_state.selected_stock
 df_stock = fetch_stock_quant_data(target_stock)
 stock_name, bfp_text = analyze_twstock_best_four_point(target_stock)
-fundamentals = fetch_stock_fundamentals(target_stock)
-news_items, chips_summary, chips_daily_df = fetch_finmind_data(
+news_items, chips_summary, chips_daily_df, finmind_val = fetch_finmind_data(
     target_stock, st.session_state.get("finmind_token", "")
 )
+fundamentals = fetch_stock_fundamentals(target_stock, finmind_val)
 
 if df_stock is None or df_stock.empty:
     st.error(f"⚠️ 無法取得 `{target_stock}` 的市場數據，請從左側選擇其他股票或確認代號。")
@@ -563,24 +616,24 @@ with head_col2:
         df_stock = fetch_stock_quant_data(target_stock, period=kline_period)
         latest_row = df_stock.iloc[-1]
 
-# 頂部 6 格核心資訊卡
+# 頂部 6 格核心資訊卡（已優化字體大小與 FinMind 雙重估值備援）
 m1, m2, m3, m4, m5, m6 = st.columns(6)
 m1.metric("最新收盤價", f"{latest_row['Close']:.2f}", f"{price_diff:+.2f} ({diff_pct:+.2f}%)")
 m2.metric("今日最高 / 最低", f"{latest_row['High']:.1f} / {latest_row['Low']:.1f}")
 m3.metric("成交量 (張)", f"{int(latest_row['Volume'] // 1000):,}")
 m4.metric(
     "本益比 (P/E)",
-    f"{fundamentals['trailing_pe']:.1f}x" if fundamentals.get("trailing_pe") else "N/A",
+    f"{fundamentals['trailing_pe']:.1f} 倍" if fundamentals.get("trailing_pe") else "ETF/不適用",
 )
 m5.metric(
     "現金殖利率",
-    f"{fundamentals['dividend_yield']*100:.2f}%" if fundamentals.get("dividend_yield") and fundamentals["dividend_yield"] < 1 else (f"{fundamentals['dividend_yield']:.2f}%" if fundamentals.get("dividend_yield") else "N/A"),
+    f"{fundamentals['dividend_yield']:.2f}%" if fundamentals.get("dividend_yield") else "N/A",
 )
 m6.metric("RSI(14) / K值", f"{latest_row['RSI']:.1f} / {latest_row['K']:.1f}")
 
 
 # ==========================================
-# 8. 五大清爽模組分頁 (告別凌亂畫面)
+# 8. 五大清爽模組分頁
 # ==========================================
 tab_tech, tab_fund, tab_chips, tab_news, tab_ai = st.tabs(
     [
@@ -592,9 +645,6 @@ tab_tech, tab_fund, tab_chips, tab_news, tab_ai = st.tabs(
     ]
 )
 
-# ------------------------------------------
-# 分頁 1：技術看盤室
-# ------------------------------------------
 with tab_tech:
     ctrl_c1, ctrl_c2 = st.columns([3, 1])
     with ctrl_c1:
@@ -609,55 +659,31 @@ with tab_tech:
     t1, t2, t3, t4, t5, t6 = st.columns(6)
     t1.metric("MA5 / MA20", f"{latest_row['MA5']:.1f} / {latest_row['MA20']:.1f}")
     t2.metric("季線 (MA60)", f"{latest_row['MA60']:.1f}" if pd.notna(latest_row["MA60"]) else "N/A")
-    t3.metric("KD 指標 (9日)", f"K:{latest_row['K']:.1f} / D:{latest_row['D']:.1f}")
+    t3.metric("KD 指標 (9日)", f"{latest_row['K']:.1f} / {latest_row['D']:.1f}")
     t4.metric("MACD 柱狀體", f"{latest_row['MACD_Hist']:+.2f}" if pd.notna(latest_row["MACD_Hist"]) else "N/A")
     t5.metric("ATR(14) 真實波幅", f"{latest_row['ATR']:.2f}")
     t6.metric("區間最大回撤 (MDD)", f"{df_stock['Drawdown'].min()*100:.2f}%")
 
-# ------------------------------------------
-# 分頁 2：基本面與財報估值 (財報狗風格)
-# ------------------------------------------
 with tab_fund:
     st.markdown("#### 💎 個股價值評估與財務核心指標")
     f1, f2, f3, f4 = st.columns(4)
     f1.metric(
-        "總市值",
-        f"{fundamentals['market_cap']/1e8:,.0f} 億" if fundamentals.get("market_cap") else "N/A",
+        "本益比 (P/E)",
+        f"{fundamentals['trailing_pe']:.2f} 倍" if fundamentals.get("trailing_pe") else "N/A",
     )
     f2.metric(
-        "本益比 (歷史 / 預估)",
-        f"{fundamentals.get('trailing_pe') or 0:.1f}x / {fundamentals.get('forward_pe') or 0:.1f}x"
-        if fundamentals.get("trailing_pe")
-        else "N/A",
+        "股價淨值比 (P/B)",
+        f"{fundamentals['price_to_book']:.2f} 倍" if fundamentals.get("price_to_book") else "N/A",
     )
     f3.metric(
-        "股價淨值比 (P/B)",
-        f"{fundamentals['price_to_book']:.2f}x" if fundamentals.get("price_to_book") else "N/A",
+        "現金殖利率",
+        f"{fundamentals['dividend_yield']:.2f}%" if fundamentals.get("dividend_yield") else "N/A",
     )
     f4.metric(
-        "近四季 EPS (每股盈餘)",
-        f"{fundamentals['eps']:.2f} 元" if fundamentals.get("eps") else "N/A",
+        "52 週最高 / 最低",
+        f"{fundamentals['52w_high']} / {fundamentals['52w_low']}" if fundamentals.get("52w_high") else "N/A",
     )
 
-    f5, f6, f7, f8 = st.columns(4)
-    f5.metric(
-        "ROE (股東權益報酬率)",
-        f"{fundamentals['roe']*100:.2f}%" if fundamentals.get("roe") else "N/A",
-    )
-    f6.metric(
-        "毛利率 (Gross Margin)",
-        f"{fundamentals['gross_margins']*100:.2f}%" if fundamentals.get("gross_margins") else "N/A",
-    )
-    f7.metric(
-        "營業利益率",
-        f"{fundamentals['operating_margins']*100:.2f}%" if fundamentals.get("operating_margins") else "N/A",
-    )
-    f8.metric(
-        "營收年增率 (YoY)",
-        f"{fundamentals['revenue_growth']*100:+.2f}%" if fundamentals.get("revenue_growth") else "N/A",
-    )
-
-    # 52 週高低點位階進度條
     high_52 = fundamentals.get("52w_high")
     low_52 = fundamentals.get("52w_low")
     close_val = latest_row["Close"]
@@ -667,18 +693,14 @@ with tab_fund:
         pos_pct = float(np.clip(raw_pct, 0.0, 1.0))
         st.divider()
         st.markdown(
-            f"##### 📏 52 週股價位階：目前位於 52 週區間的 `{pos_pct*100:.1f}%` （最低 `{low_52}` ～ 最高 `{high_52}`）"
+            f"##### 📏 52 週股價位階：目前位於近一年區間的 `{pos_pct*100:.1f}%` （最低 `{low_52}` ～ 最高 `{high_52}`）"
         )
         st.progress(pos_pct)
-
 
     st.divider()
     st.markdown("##### 🏢 公司營運與產業簡介")
     st.write(fundamentals.get("summary", "暫無公司詳細簡介。"))
 
-# ------------------------------------------
-# 分頁 3：法人籌碼追蹤
-# ------------------------------------------
 with tab_chips:
     st.markdown("#### 🏦 近 20 日三大法人買賣超統計")
     st.success(f"**📊 區間累計買賣超**：{chips_summary}")
@@ -695,20 +717,25 @@ with tab_chips:
         st.info("目前無此標的之三大法人明細資料。")
 
 # ------------------------------------------
-# 分頁 4：即時財經新聞 (可點擊超連結卡片)
+# 分頁 4：即時財經新聞 (改用標準 HTML <a> 超連結，徹底隱藏亂碼網址)
 # ------------------------------------------
 with tab_news:
     st.markdown(f"#### 📰 `{target_stock} {stock_name}` 最新相關財經新聞與法說會動態")
     if news_items:
         for item in news_items:
-            title_md = (
-                f"[{item['title']}]({item['link']})" if item.get("link") else item["title"]
-            )
+            if item.get("link"):
+                link_html = (
+                    f'<a class="news-link" href="{item["link"]}" target="_blank" rel="noopener noreferrer">'
+                    f'🔗 {item["title"]}</a>'
+                )
+            else:
+                link_html = f'<span class="news-link">{item["title"]}</span>'
+
             st.markdown(
                 f"""
                 <div class="news-card">
-                    <small style="color:gray;">🕒 {item['date']} ｜ 來源：{item['source']}</small><br>
-                    <strong>🔗 {title_md}</strong>
+                    <div style="color: #8b949e; font-size: 0.85rem;">🕒 {item['date']} ｜ 來源：{item['source']}</div>
+                    {link_html}
                 </div>
                 """,
                 unsafe_allow_html=True,
@@ -716,9 +743,6 @@ with tab_news:
     else:
         st.info("近期暫無相關財經新聞。")
 
-# ------------------------------------------
-# 分頁 5：Multi-Agent 顧問團 & 獨立風控核可室
-# ------------------------------------------
 with tab_ai:
     st.markdown("#### ⚡ Shioaji Pro 快捷分析技能 (一鍵召喚三位專家會診)")
     sk1, sk2, sk3, sk4 = st.columns(4)
@@ -733,7 +757,7 @@ with tab_ai:
     with sk2:
         if st.button("💎 /基本面與估值體檢", use_container_width=True):
             triggered_skill_prompt = (
-                f"請執行【/基本面與估值體檢】：針對 {target_stock} 的本益比(PE)、股價淨值比(PB)、ROE 與殖利率進行評估，"
+                f"請執行【/基本面與估值體檢】：針對 {target_stock} 的本益比(PE)、股價淨值比(PB)與殖利率進行評估，"
                 f"判斷目前股價處於昂貴、合理還是便宜區間。"
             )
     with sk3:
@@ -791,7 +815,7 @@ with tab_ai:
 目前使用者鎖定的台股為：{target_stock} ({stock_name})，總資金：{total_capital} 元，單筆最大風險上限：{max_risk_pct}%。
 
 每次回答時，請務必先透過 Function Calling 呼叫 `tool_get_stock_full_analysis` 取得最新真實數據（若涉及下單或停損停利試算，請主動呼叫 `tool_propose_bracket_order`），並依序由以下三位專家進行結構化會診：
-1. **🌍 宏觀與基本面情報專家**：解讀本益比/殖利率/ROE、近期新聞（請保留 Markdown 新聞超連結格式）與三大法人籌碼。
+1. **🌍 宏觀與基本面情報專家**：解讀本益比/殖利率、近期新聞（請保留 Markdown 新聞超連結格式）與三大法人籌碼。
 2. **📈 量化技術交易員**：根據均線、KD、RSI、ATR 與四大買賣點，給出明確支撐壓力與多空判斷。
 3. **🛡️ 毒舌資產精算師**：根據最大回撤 (MDD) 與風報比，用犀利不留情面的語氣指出風險盲點，並提醒去右側「獨立風控核可台」確認委託。
 """
