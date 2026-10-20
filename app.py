@@ -875,3 +875,4 @@ with tab_ai:
         if st.session_state.executed_orders:
             st.markdown("##### 📜 已核可委託紀錄")
             st.dataframe(pd.DataFrame(st.session_state.executed_orders), use_container_width=True)
+   
