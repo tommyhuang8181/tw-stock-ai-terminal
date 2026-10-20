@@ -1,5 +1,5 @@
 streamlit
-pandas
+pandas<3.0.0
 numpy
 yfinance
 ta
@@ -8,3 +8,4 @@ pyecharts
 google-genai
 twstock
 lxml
+requests
