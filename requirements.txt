@@ -1,0 +1,10 @@
+streamlit
+pandas
+numpy
+yfinance
+ta
+FinMind
+pyecharts
+google-genai
+twstock
+lxml
