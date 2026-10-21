@@ -1,10 +1,13 @@
 streamlit
-yfinance
-google-generativeai
-pandas
+pandas<3.0.0
 numpy
+yfinance
+ta
+FinMind
+pyecharts
+google-genai
+google-generativeai
 twstock
 lxml
 requests
 feedparser
-FinMind
