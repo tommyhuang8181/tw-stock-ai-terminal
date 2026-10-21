@@ -1,0 +1,10 @@
+streamlit
+yfinance
+google-generativeai
+pandas
+numpy
+twstock
+lxml
+requests
+feedparser
+FinMind
